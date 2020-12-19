@@ -1,0 +1,6 @@
+* Simple MUD en Erlang
+* Features
+  - Jugadores: nombre, sala
+    - look, talk, whisper, shout, help, go, quit
+    - ir (n, s, e, w)
+  - Salas: descripción, salidas
