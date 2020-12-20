@@ -14,22 +14,37 @@ start() ->
     io:format("**** Multi User Dungeon Server Started ****~n"),
     io:format("** Starting sessions manager process **~n"),
     SessionsProcess = spawn(?MODULE, sessions_process, [[]]),
+    WorldState = #{ users => #{} },
+    WorldProcess = spawn(?MODULE, world_process, [WorldState]),
+    SystemProcesses = #{ sessions => SessionsProcess, world => WorldProcess },
     case gen_tcp:listen(0, [binary, {packet, 0}, {active, false}]) of
         {ok, ListenSock} ->
             {ok, Port} = inet:port(ListenSock),
             io:format("conectado a ~p~n",[Port]),
-            server(ListenSock, SessionsProcess);
+            server(ListenSock, SystemProcesses);
         {error, Reason} -> 
             {error, Reason}
     end.
+
+world_process(State) ->
+    receive
+        {new_user, User} -> 
+            #{users := Users} = State,
+            world_process(State#{ users := Users#{User => #{ location => plaza }}});
+        {location, Pid, User} ->
+            #{users := #{ User := #{ location := Location }}} = State,
+            Pid ! {location, Location},
+            world_process(State)
+    end.
     
-server(ListenSock, SessionsProcess) ->
+server(ListenSock, SystemProcesses = #{ sessions := SessionsProcess }) ->
     case gen_tcp:accept(ListenSock) of
         {ok, Socket} ->
-            Pid = spawn(?MODULE, session, [Socket, SessionsProcess]),
+            Conn = #{ socket => Socket, system_processes => SystemProcesses },
+            Pid = spawn(?MODULE, session, [Conn]),
             ok = gen_tcp:controlling_process(Socket, Pid),
             SessionsProcess ! {new, Pid},
-            server(ListenSock, SessionsProcess);
+            server(ListenSock, SystemProcesses);
         Other ->
             io:format("accept returned ~w - goodbye!~n", [Other]),
             ok
@@ -46,31 +61,30 @@ sessions_process(Sessions) ->
             sessions_process(lists:delete(P, Sessions))
     end.
 
-% Un cliente se conecta
-session(Socket, SessionsProcess) ->
-    case login(Socket) of
-        {ok, Name} ->
+session(Conn = #{ socket := Socket, system_processes := #{ sessions := SessionsProcess, world := WorldPid }}) ->
+    case login(Conn) of
+        {ok, NewConn = #{ username := Name }} ->
             io:format("~s ha entrado al Server~n", [Name]),
-            user_logged(Socket, Name, SessionsProcess);
+            WorldPid ! {new_user, Name},
+            user_logged(NewConn);
         _ ->
             io:format("Error login~n"),
             exit(vaya)
     end.
-login(Socket) ->
-    gen_tcp:send(Socket, "BIENVENIDO AL GRAN MUD\nTu nombre?: "),
+login(Conn = #{ socket := Socket }) ->
+    message(Conn, "BIENVENIDO AL GRAN MUD\nTu nombre?: "),
     inet:setopts(Socket, [{active, once}]),
     receive
         {tcp, Socket, Data} ->
-            {ok, string:trim(binary_to_list(Data))};
+            User = string:trim(binary_to_list(Data)),
+            {ok, Conn#{ username => User }};
         _ -> error
     end.
 
 sformat(FS, Args) ->
     lists:flatten(io_lib:format(FS, Args)).
 
-user_logged(Socket, Name, SessionsProcess) ->
-    UserState = #{ name => Name,  location => plaza },
-    Conn = #{ user_state => UserState, socket => Socket, sessions_process => SessionsProcess },
+user_logged(Conn = #{ username := Name }) ->
     message(Conn, sformat("Bienvenido ~s, te recuerdo...~n", [Name])),
     user_entry(Conn).
 
@@ -86,7 +100,7 @@ user_loop(Conn) ->
             user_loop(UpdatedConn)
     end.
 
-ask_action(Conn = #{ socket := Socket, sessions_process := SessionsProcess }) ->
+ask_action(Conn = #{ socket := Socket, system_processes := #{ sessions := SessionsProcess } }) ->
     message(Conn, "> "),
     inet:setopts(Socket, [{active, once}]),
     receive
@@ -99,8 +113,12 @@ ask_action(Conn = #{ socket := Socket, sessions_process := SessionsProcess }) ->
              exit
     end.
 
-describe_location(Conn = #{ user_state := #{ location := Location }}) ->
-    message(Conn, sformat("Estas en ~s~n", [Location])).
+describe_location(Conn = #{ username := Name, system_processes := #{ world := WorldPid }}) ->
+    WorldPid ! {location, self(), Name},
+    receive
+        {location, Location} ->
+            message(Conn, sformat("Estas en ~s~n", [Location]))
+    end.
 
 message(#{ socket := Socket }, Message) ->
     gen_tcp:send(Socket, Message).
