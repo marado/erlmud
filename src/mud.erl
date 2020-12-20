@@ -28,9 +28,28 @@ start() ->
 
 % world_process(State) is the main function for the world process which stores the state of the world 
 % and responds to queries and commands from the users
+make_location(Name, Directions) ->
+    ets:insert(locations, {Name, []}),
+    ets:insert(directions, {Name, Directions}).
+directions_from(Location) ->
+    {_, Dirs} = ets:lookup(directions, Location),
+    Dirs.
+users_in(Location) ->
+    UsersIn = ets:lookup(locations, Location),
+    UsersIn.
+
 world_start() ->
     ets:new(world, [ordered_set, named_table]),
     ets:new(users, [ordered_set, named_table]),
+    ets:new(locations, [ordered_set, named_table]),
+    ets:new(directions, [ordered_set, named_table]),
+    make_location(plaza, #{ n => agora, s => mercado, w => academia, e => salida_sur }),
+    make_location(agora, #{ s => plaza, e => templo, n => acropolis }),
+    make_location(templo, #{ w => agora, n => acropolis }),
+    make_location(mercado, #{ n => plaza, w => academia }),
+    make_location(academia, #{ e => plaza, s => mercado }),
+    make_location(salida_sur, #{ w => plaza }),
+    make_location(acropolis, #{ s => agora }),
     world_process().
 canonical_username(UserString) ->
     UserString2 = lists:flatten(string:tokens(UserString, " ")),
@@ -38,21 +57,38 @@ canonical_username(UserString) ->
     UserString4 = lists:flatten(string:tokens(UserString3, "_")),
     UserString5 = lists:flatten(string:tokens(UserString4, ".")),
     string:lowercase(UserString5).
+
+change_user_location(CanonicUser, NewLocation) ->
+    UserInfo = ets:lookup_element(users, CanonicUser, 2),
+    #{ location := OldLocation } = UserInfo,
+    NewUserInfo = UserInfo#{ location := NewLocation },
+    ets:insert(users, {CanonicUser, NewUserInfo}),
+    OldLocationInfo = ets:lookup_element(locations, OldLocation, 2),
+    UpdatedOldLocationInfo = lists:delete(CanonicUser, OldLocationInfo),
+    ets:insert(locations, {OldLocation, UpdatedOldLocationInfo}),
+    NewLocationInfo = ets:lookup_element(locations, NewLocation, 2),
+    UpdatedNewLocationInfo = [ CanonicUser | NewLocationInfo],
+    ets:insert(locations, {NewLocation, UpdatedNewLocationInfo}).
+    
 world_process() ->
     receive
         {try_login, Pid, User} -> 
             CanonicUser = canonical_username(User),
             case ets:member(users, CanonicUser) of
                 false ->
-                    true = ets:insert_new(users, {CanonicUser, #{location => plaza}}),
+                    true = ets:insert_new(users, {CanonicUser, #{ location => plaza }}),
+                    change_user_location(CanonicUser, plaza),
                     Pid ! { login_succeded, User };
                 true ->
                     Pid ! { login_failed, User }
             end,
             world_process();
         {location, Pid, User} ->
-            #{ location := Location } = ets:lookup_element(users, canonical_username(User), 2),
-            Pid ! {location, Location},
+            CanonicalUser = canonical_username(User),
+            #{ location := Location } = ets:lookup_element(users, CanonicalUser, 2),
+            Users = ets:lookup_element(locations, Location, 2),
+            Directions = ets:lookup_element(directions, Location, 2),
+            Pid ! {location, Location, #{users => Users, directions => Directions}},
             world_process()
     end.
 
@@ -169,12 +205,19 @@ ask_action(Conn = #{ socket := Socket, system_processes := #{ sessions := Sessio
              exit
     end.
 
+sformat_direction_option({Direction, Location}) ->
+    sformat("~p -> ~p",[Direction, Location]).
+
 % describe a location, triggered usually when the character enters a new zone
 describe_location(Conn = #{ username := Name, system_processes := #{ world := WorldPid }}) ->
     WorldPid ! {location, self(), Name},
     receive
-        {location, Location} ->
-            message(Conn, sformat("Estas en ~s~n", [Location]))
+        {location, Location, LocationInfo = #{users := Users, directions := Directions}} ->
+            message(Conn, sformat("Estas en ~s~n", [Location])),
+            message(Conn, sformat("En este lugar están ~p~n", [Users])),
+            message(Conn, "Puedes ir a los siguientes lugares:\n"),
+            SS = lists:map(fun(X)->sformat_direction_option(X)end, maps:to_list(Directions)),
+            message(Conn, string:join(SS, ", ") ++ ".\n")
     end.
 
 % prints a message to the user
@@ -182,7 +225,7 @@ message(#{ socket := Socket }, Message) ->
     gen_tcp:send(Socket, Message).
 
 % catalog of actions to the user
-perform_action(Conn, Data) ->
+perform_action(Conn = #{ system_processes := #{ world := WorldPid } }, Data) ->
     Commands = string:tokens(Data, " "),
     Cmd = hd(Commands),
     if
