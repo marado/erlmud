@@ -15,8 +15,7 @@ start() ->
     io:format("**** Multi User Dungeon Server Started ****~n"),
     io:format("** Starting sessions manager process **~n"),
     SessionsProcess = spawn(?MODULE, sessions_process, [[]]),
-    WorldState = #{ users => #{} },
-    WorldProcess = spawn(?MODULE, world_process, [WorldState]),
+    WorldProcess = spawn(?MODULE, world_start, []),
     SystemProcesses = #{ sessions => SessionsProcess, world => WorldProcess },
     case gen_tcp:listen(0, [binary, {packet, 0}, {active, false}]) of
         {ok, ListenSock} ->
@@ -29,15 +28,38 @@ start() ->
 
 % world_process(State) is the main function for the world process which stores the state of the world 
 % and responds to queries and commands from the users
-world_process(State) ->
+world_start() ->
+    ets:new(world, [ordered_set, named_table]),
+    ets:new(users, [ordered_set, named_table]),
+    world_process().
+canonical_username(UserString) ->
+    UserString2 = lists:flatten(string:tokens(UserString, " ")),
+    UserString3 = lists:flatten(string:tokens(UserString2, "-")),
+    UserString4 = lists:flatten(string:tokens(UserString3, "_")),
+    UserString5 = lists:flatten(string:tokens(UserString4, ".")),
+    string:lowercase(UserString5).
+world_process() ->
     receive
-        {new_user, User} -> 
-            #{users := Users} = State,
-            world_process(State#{ users := Users#{User => #{ location => plaza }}});
+        {try_login, Pid, User} -> 
+            CanonicUser = canonical_username(User),
+            case ets:member(users, CanonicUser) of
+                false ->
+                    true = ets:insert_new(users, {CanonicUser, #{location => plaza}}),
+                    Pid ! { login_succeded, User };
+                true ->
+                    Pid ! { login_failed, User }
+            end,
+            world_process();
         {location, Pid, User} ->
-            #{users := #{ User := #{ location := Location }}} = State,
+            #{ location := Location } = ets:lookup_element(users, canonical_username(User), 2),
             Pid ! {location, Location},
-            world_process(State)
+            world_process()
+    end.
+
+place_description(Location) ->
+    case Location of
+        plaza ->
+            ""
     end.
 
 % server(ListenSock, SystemProcesses) multiplexes accept connections into individual sessions
@@ -69,25 +91,47 @@ sessions_process(Sessions) ->
 
 % session(Conn) starts the user session, tries to login then transfer control to succesive functions/states of the user session in the MUD
 session(Conn = #{ socket := Socket, system_processes := #{ sessions := SessionsProcess, world := WorldPid }}) ->
-    case login(Conn) of
-        {ok, NewConn = #{ username := Name }} ->
-            io:format("~s ha entrado al Server~n", [Name]),
-            WorldPid ! {new_user, Name},
-            user_logged(NewConn);
+    case try_login(Conn) of
+        {ok, User} ->
+            io:format("~s ha entrado al Server~n", [User]),
+            user_logged(Conn#{username => User});
         _ ->
-            io:format("Error login~n"),
-            exit(vaya)
+            message(Conn, "Saliendo...\n"),
+            SessionsProcess ! {quit, self()},
+            gen_tcp:close(Socket)
     end.
 
-% login(Conn) ask for a name to the user
-login(Conn = #{ socket := Socket }) ->
-    message(Conn, "BIENVENIDO AL GRAN MUD\nTu nombre?: "),
+% try_login(Conn) ask for a name to the user
+try_login(Conn = #{ socket := Socket }) ->
+    message(Conn, "BIENVENIDO AL GRAN MUD\n"),
+    try_login_loop(Conn, 0).
+
+try_login_loop(Conn = #{ socket := Socket, system_processes := #{ world := WorldPid } }, Attempt) when Attempt < 3 ->
+    message(Conn, sformat("[~p]Tu nombre?: ",[Attempt])),
     inet:setopts(Socket, [{active, once}]),
     receive
         {tcp, Socket, Data} ->
             User = string:trim(binary_to_list(Data)),
-            {ok, Conn#{ username => User }};
+            case try_login_name(User, WorldPid) of
+                {ok, _} ->
+                    {ok, User};
+                {error, _} ->
+                    message(Conn, "Nombre cogido\n"),
+                    try_login_loop(Conn, Attempt + 1)
+            end;
         _ -> error
+    end;
+try_login_loop(Conn, _) ->
+    message(Conn, "Excedido el numero de intentos de login permitido\n"),
+    error.
+
+try_login_name(User, WorldPid) ->
+    WorldPid ! {try_login, self(), User},
+    receive
+        {login_succeded, User} ->
+            {ok, User};
+        {login_failed, User} ->
+            {error, User}
     end.
 
 % utility function to have io:format capabilities into string
