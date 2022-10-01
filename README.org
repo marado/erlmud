@@ -2,9 +2,11 @@
 WIP
 
 ** Uso
-make run -> arrancar server
-make connect -> conectar al server (se necesita la utilidad socat)
-make test -> test sencillo
+#+begin_src sh
+make run     # arrancar server
+make connect # conectar al server (se necesita la utilidad socat)
+make test    # test sencillo
+#+end_src
 
 * Features
   - Jugadores: nombre, sala
@@ -13,8 +15,8 @@ make test -> test sencillo
   - Salas: descripción, salidas
 ** Referencias de interés
 *** Parsing
-http://www.skotos.net/articles/dawnof09.shtml
-http://www.gammon.com.au/forum/?id=5959&reply=7#reply7
-http://www.gammon.com.au/forum/bbshowpost.php?bbsubject_id=4496
-http://www.ifwiki.org/index.php/Past_raif_topics
-https://www.evennia.com/docs/latest/Building-Quickstart.html
+  - http://www.skotos.net/articles/dawnof09.shtml
+  - http://www.gammon.com.au/forum/?id=5959&reply=7#reply7
+  - http://www.gammon.com.au/forum/bbshowpost.php?bbsubject_id=4496
+  - http://www.ifwiki.org/index.php/Past_raif_topics
+  - https://www.evennia.com/docs/latest/Building-Quickstart.html
